@@ -58,7 +58,9 @@ static void ExplainOneQuery(Query *query, int cursorOptions,
 							const char *queryString, ParamListInfo params,
 							QueryEnvironment *queryEnv);
 static void report_triggers(ResultRelInfo *rInfo, bool show_relname,
-							ExplainState *es);
+							ExplainState *es,
+                                                        const char *group_name,
+                                                        bool *explain_group_opened);
 static double elapsed_time(instr_time *starttime);
 static bool ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used);
 static void ExplainNode(PlanState *planstate, List *ancestors,
@@ -556,8 +558,7 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 	}
 
 	/* Print info about runtime of triggers */
-	if (es->analyze)
-		ExplainPrintTriggers(es, queryDesc);
+        ExplainPrintTriggers(es, queryDesc);
 
 	/*
 	 * Print info about JITing. Tied to es->costs because we don't want to
@@ -731,35 +732,38 @@ ExplainPrintTriggers(ExplainState *es, QueryDesc *queryDesc)
 	List	   *targrels;
 	int			nr;
 	ListCell   *l;
+        char       *group_name;
+        bool       explain_group_opened = false;
 
 	routerels = queryDesc->estate->es_tuple_routing_result_relations;
 	targrels = queryDesc->estate->es_trig_target_relations;
 
-	ExplainOpenGroup("Triggers", "Triggers", false, es);
+        group_name = (es->analyze) ? "Triggers" : "Possible Triggers";
 
-	show_relname = (numrels > 1 || numrootrels > 0 ||
-					routerels != NIL || targrels != NIL);
-	rInfo = queryDesc->estate->es_result_relations;
-	for (nr = 0; nr < numrels; rInfo++, nr++)
-		report_triggers(rInfo, show_relname, es);
+        show_relname = (numrels > 1 || numrootrels > 0 ||
+                                        routerels != NIL || targrels != NIL);
+        rInfo = queryDesc->estate->es_result_relations;
+        for (nr = 0; nr < numrels; rInfo++, nr++)
+                report_triggers(rInfo, show_relname, es, group_name, &explain_group_opened);
 
-	rInfo = queryDesc->estate->es_root_result_relations;
-	for (nr = 0; nr < numrootrels; rInfo++, nr++)
-		report_triggers(rInfo, show_relname, es);
+        rInfo = queryDesc->estate->es_root_result_relations;
+        for (nr = 0; nr < numrootrels; rInfo++, nr++)
+                report_triggers(rInfo, show_relname, es, group_name, &explain_group_opened);
 
-	foreach(l, routerels)
-	{
-		rInfo = (ResultRelInfo *) lfirst(l);
-		report_triggers(rInfo, show_relname, es);
-	}
+        foreach(l, routerels)
+        {
+                rInfo = (ResultRelInfo *) lfirst(l);
+                report_triggers(rInfo, show_relname, es, group_name, &explain_group_opened);
+        }
 
-	foreach(l, targrels)
-	{
-		rInfo = (ResultRelInfo *) lfirst(l);
-		report_triggers(rInfo, show_relname, es);
-	}
+        foreach(l, targrels)
+        {
+                rInfo = (ResultRelInfo *) lfirst(l);
+                report_triggers(rInfo, show_relname, es, group_name, &explain_group_opened);
+        }
 
-	ExplainCloseGroup("Triggers", "Triggers", false, es);
+        if (explain_group_opened)
+                ExplainCloseGroup(group_name, group_name, false, es);
 }
 
 /*
@@ -907,30 +911,40 @@ ExplainQueryText(ExplainState *es, QueryDesc *queryDesc)
  *		report execution stats for a single relation's triggers
  */
 static void
-report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
+report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es, const char *group_name, bool *explain_group_opened)
 {
 	int			nt;
 
-	if (!rInfo->ri_TrigDesc || !rInfo->ri_TrigInstrument)
+	if (!rInfo->ri_TrigDesc || (es->analyze && !rInfo->ri_TrigInstrument))
 		return;
 	for (nt = 0; nt < rInfo->ri_TrigDesc->numtriggers; nt++)
 	{
 		Trigger    *trig = rInfo->ri_TrigDesc->triggers + nt;
-		Instrumentation *instr = rInfo->ri_TrigInstrument + nt;
+		Instrumentation *instr;
 		char	   *relname;
 		char	   *conname = NULL;
 
-		/* Must clean up instrumentation state */
-		InstrEndLoop(instr);
+                if (es->analyze) {
+                        instr = rInfo->ri_TrigInstrument + nt;
+                        /* Must clean up instrumentation state */
+                        InstrEndLoop(instr);
 
-		/*
-		 * We ignore triggers that were never invoked; they likely aren't
-		 * relevant to the current query type.
-		 */
-		if (instr->ntuples == 0)
-			continue;
+                        /*
+                         * We ignore triggers that were never invoked; they likely aren't
+                         * relevant to the current query type.
+                         */
+                        if (instr->ntuples == 0)
+                                continue;
+                }
 
-		ExplainOpenGroup("Trigger", NULL, true, es);
+
+                if (! *explain_group_opened)
+                {
+                        ExplainOpenGroup(group_name, group_name, false, es);
+                        *explain_group_opened = true;
+                }
+
+                ExplainOpenGroup(group_name, NULL, true, es);
 
 		relname = RelationGetRelationName(rInfo->ri_RelationDesc);
 		if (OidIsValid(trig->tgconstraint))
@@ -943,6 +957,8 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 		 */
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
+                        if (!es->analyze)
+                          appendStringInfoString(es->str, "Possible ");
 			if (es->verbose || conname == NULL)
 				appendStringInfo(es->str, "Trigger %s", trig->tgname);
 			else
@@ -951,11 +967,15 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 				appendStringInfo(es->str, " for constraint %s", conname);
 			if (show_relname)
 				appendStringInfo(es->str, " on %s", relname);
-			if (es->timing)
-				appendStringInfo(es->str, ": time=%.3f calls=%.0f\n",
-								 1000.0 * instr->total, instr->ntuples);
-			else
-				appendStringInfo(es->str, ": calls=%.0f\n", instr->ntuples);
+                        if (es->analyze)
+                        {
+                                if (es->timing)
+                                        appendStringInfo(es->str, ": time=%.3f calls=%.0f",
+                                                                         1000.0 * instr->total, instr->ntuples);
+                                else
+                                        appendStringInfo(es->str, ": calls=%.0f", instr->ntuples);
+                        }
+                        appendStringInfoString(es->str, "\n");
 		}
 		else
 		{
@@ -963,16 +983,19 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 			if (conname)
 				ExplainPropertyText("Constraint Name", conname, es);
 			ExplainPropertyText("Relation", relname, es);
-			if (es->timing)
-				ExplainPropertyFloat("Time", "ms", 1000.0 * instr->total, 3,
-									 es);
-			ExplainPropertyFloat("Calls", NULL, instr->ntuples, 0, es);
+                        if (es->analyze)
+                        {
+                                if (es->timing)
+                                        ExplainPropertyFloat("Time", "ms", 1000.0 * instr->total, 3,
+                                                                                 es);
+                                ExplainPropertyFloat("Calls", NULL, instr->ntuples, 0, es);
+                        }
 		}
 
 		if (conname)
 			pfree(conname);
 
-		ExplainCloseGroup("Trigger", NULL, true, es);
+                ExplainCloseGroup(group_name, NULL, true, es);
 	}
 }
 
