@@ -29,6 +29,7 @@
 #include "catalog/pg_type.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
+#include "commands/progress.h"
 #include "commands/trigger.h"
 #include "executor/execPartition.h"
 #include "executor/executor.h"
@@ -45,6 +46,7 @@
 #include "parser/parse_collate.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
+#include "pgstat.h"
 #include "port/pg_bswap.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/fd.h"
@@ -1802,6 +1804,9 @@ BeginCopy(ParseState *pstate,
 
 	cstate->copy_dest = COPY_FILE;	/* default */
 
+	pgstat_progress_start_command(PROGRESS_COMMAND_COPY, queryRelId);
+	pgstat_progress_update_param(PROGRESS_COPY_PROCESSED,0);
+
 	MemoryContextSwitchTo(oldcontext);
 
 	return cstate;
@@ -1860,6 +1865,8 @@ EndCopy(CopyState cstate)
 					 errmsg("could not close file \"%s\": %m",
 							cstate->filename)));
 	}
+
+	pgstat_progress_end_command();
 
 	MemoryContextDelete(cstate->copycontext);
 	pfree(cstate);
@@ -2173,7 +2180,7 @@ CopyTo(CopyState cstate)
 
 			/* Format and send the data */
 			CopyOneRowTo(cstate, slot);
-			processed++;
+			pgstat_progress_update_param(PROGRESS_COPY_PROCESSED, ++processed);
 		}
 
 		ExecDropSingleTupleTableSlot(slot);
@@ -3311,7 +3318,7 @@ CopyFrom(CopyState cstate)
 			 * or FDW; this is the same definition used by nodeModifyTable.c
 			 * for counting tuples inserted by an INSERT command.
 			 */
-			processed++;
+			pgstat_progress_update_param(PROGRESS_COPY_PROCESSED, ++processed);
 		}
 	}
 
@@ -5171,7 +5178,7 @@ copy_dest_receive(TupleTableSlot *slot, DestReceiver *self)
 
 	/* Send the data */
 	CopyOneRowTo(cstate, slot);
-	myState->processed++;
+	pgstat_progress_update_param(PROGRESS_COPY_PROCESSED, ++myState->processed);
 
 	return true;
 }
