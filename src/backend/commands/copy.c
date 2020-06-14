@@ -574,6 +574,7 @@ CopySendEndOfRow(CopyState cstate)
 							(errcode_for_file_access(),
 							 errmsg("could not write to COPY file: %m")));
 			}
+			pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, ftell(cstate->copy_file));
 			break;
 		case COPY_OLD_FE:
 			/* The FE/BE protocol uses \n as newline for all platforms */
@@ -626,6 +627,7 @@ CopyGetData(CopyState cstate, void *databuf, int minread, int maxread)
 	{
 		case COPY_FILE:
 			bytesread = fread(databuf, 1, maxread, cstate->copy_file);
+			pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, ftell(cstate->copy_file));
 			if (ferror(cstate->copy_file))
 				ereport(ERROR,
 						(errcode_for_file_access(),
@@ -1804,8 +1806,12 @@ BeginCopy(ParseState *pstate,
 
 	cstate->copy_dest = COPY_FILE;	/* default */
 
-	pgstat_progress_start_command(PROGRESS_COMMAND_COPY, queryRelId);
-	pgstat_progress_update_param(PROGRESS_COPY_PROCESSED,0);
+	pgstat_progress_start_command(PROGRESS_COMMAND_COPY, cstate->rel ? RelationGetRelid(cstate->rel) : InvalidOid);
+
+	pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, 0);
+	pgstat_progress_update_param(PROGRESS_COPY_IS_FROM, (int) cstate->is_copy_from);
+	pgstat_progress_update_param(PROGRESS_COPY_IS_FILE, (int) cstate->copy_dest == COPY_FILE);
+	pgstat_progress_update_param(PROGRESS_COPY_IS_PROGRAM, (int) cstate->is_program);
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -2180,7 +2186,7 @@ CopyTo(CopyState cstate)
 
 			/* Format and send the data */
 			CopyOneRowTo(cstate, slot);
-			pgstat_progress_update_param(PROGRESS_COPY_PROCESSED, ++processed);
+			pgstat_progress_update_param(PROGRESS_COPY_LINES_PROCESSED, ++processed);
 		}
 
 		ExecDropSingleTupleTableSlot(slot);
@@ -3318,7 +3324,7 @@ CopyFrom(CopyState cstate)
 			 * or FDW; this is the same definition used by nodeModifyTable.c
 			 * for counting tuples inserted by an INSERT command.
 			 */
-			pgstat_progress_update_param(PROGRESS_COPY_PROCESSED, ++processed);
+			pgstat_progress_update_param(PROGRESS_COPY_LINES_PROCESSED, ++processed);
 		}
 	}
 
@@ -5178,7 +5184,7 @@ copy_dest_receive(TupleTableSlot *slot, DestReceiver *self)
 
 	/* Send the data */
 	CopyOneRowTo(cstate, slot);
-	pgstat_progress_update_param(PROGRESS_COPY_PROCESSED, ++myState->processed);
+	pgstat_progress_update_param(PROGRESS_COPY_LINES_PROCESSED, ++myState->processed);
 
 	return true;
 }
