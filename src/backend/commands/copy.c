@@ -230,6 +230,7 @@ typedef struct CopyStateData
 	char	   *raw_buf;
 	int			raw_buf_index;	/* next byte to process */
 	int			raw_buf_len;	/* total # of bytes stored */
+	uint64      bytes_processed; /* total # of bytes processed, used for progress reporting */
 	/* Shorthand for number of unconsumed bytes available in raw_buf */
 #define RAW_BUF_BYTES(cstate) ((cstate)->raw_buf_len - (cstate)->raw_buf_index)
 } CopyStateData;
@@ -402,6 +403,7 @@ static void CopySendInt16(CopyState cstate, int16 val);
 static bool CopyGetInt16(CopyState cstate, int16 *val);
 static bool CopyLoadRawBuf(CopyState cstate);
 static int	CopyReadBinaryData(CopyState cstate, char *dest, int nbytes);
+static int CopyUpdateBytesProgress(CopyState cstate, int newbytesprocessed);
 
 
 /*
@@ -509,18 +511,19 @@ SendCopyEnd(CopyState cstate)
 static void
 CopySendData(CopyState cstate, const void *databuf, int datasize)
 {
-	appendBinaryStringInfo(cstate->fe_msgbuf, databuf, datasize);
+	appendBinaryStringInfo(cstate->fe_msgbuf, databuf, CopyUpdateBytesProgress(cstate, datasize));
 }
 
 static void
 CopySendString(CopyState cstate, const char *str)
 {
-	appendBinaryStringInfo(cstate->fe_msgbuf, str, strlen(str));
+	appendBinaryStringInfo(cstate->fe_msgbuf, str, CopyUpdateBytesProgress(cstate, strlen(str)));
 }
 
 static void
 CopySendChar(CopyState cstate, char c)
 {
+	CopyUpdateBytesProgress(cstate, 1);
 	appendStringInfoCharMacro(cstate->fe_msgbuf, c);
 }
 
@@ -574,7 +577,6 @@ CopySendEndOfRow(CopyState cstate)
 							(errcode_for_file_access(),
 							 errmsg("could not write to COPY file: %m")));
 			}
-			pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, ftell(cstate->copy_file));
 			break;
 		case COPY_OLD_FE:
 			/* The FE/BE protocol uses \n as newline for all platforms */
@@ -627,7 +629,6 @@ CopyGetData(CopyState cstate, void *databuf, int minread, int maxread)
 	{
 		case COPY_FILE:
 			bytesread = fread(databuf, 1, maxread, cstate->copy_file);
-			pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, ftell(cstate->copy_file));
 			if (ferror(cstate->copy_file))
 				ereport(ERROR,
 						(errcode_for_file_access(),
@@ -721,6 +722,8 @@ CopyGetData(CopyState cstate, void *databuf, int minread, int maxread)
 			bytesread = cstate->data_source_cb(databuf, minread, maxread);
 			break;
 	}
+
+	CopyUpdateBytesProgress(cstate, bytesread);
 
 	return bytesread;
 }
@@ -1808,7 +1811,8 @@ BeginCopy(ParseState *pstate,
 
 	pgstat_progress_start_command(PROGRESS_COMMAND_COPY, cstate->rel ? RelationGetRelid(cstate->rel) : InvalidOid);
 
-	pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, 0);
+	/* initialize progress */
+	cstate->bytes_processed = 0;
 	pgstat_progress_update_param(PROGRESS_COPY_IS_FROM, (int) cstate->is_copy_from);
 	pgstat_progress_update_param(PROGRESS_COPY_IS_FILE, (int) cstate->copy_dest == COPY_FILE);
 	pgstat_progress_update_param(PROGRESS_COPY_IS_PROGRAM, (int) cstate->is_program);
@@ -2186,6 +2190,8 @@ CopyTo(CopyState cstate)
 
 			/* Format and send the data */
 			CopyOneRowTo(cstate, slot);
+
+			/* Increment processed lines counter and update progress */
 			pgstat_progress_update_param(PROGRESS_COPY_LINES_PROCESSED, ++processed);
 		}
 
@@ -3322,7 +3328,8 @@ CopyFrom(CopyState cstate)
 			/*
 			 * We count only tuples not suppressed by a BEFORE INSERT trigger
 			 * or FDW; this is the same definition used by nodeModifyTable.c
-			 * for counting tuples inserted by an INSERT command.
+			 * for counting tuples inserted by an INSERT command. Update 
+			 * progress as well.
 			 */
 			pgstat_progress_update_param(PROGRESS_COPY_LINES_PROCESSED, ++processed);
 		}
@@ -5184,6 +5191,7 @@ copy_dest_receive(TupleTableSlot *slot, DestReceiver *self)
 
 	/* Send the data */
 	CopyOneRowTo(cstate, slot);
+	/* Increment processed lines counter and update progress */
 	pgstat_progress_update_param(PROGRESS_COPY_LINES_PROCESSED, ++myState->processed);
 
 	return true;
@@ -5225,4 +5233,18 @@ CreateCopyDestReceiver(void)
 	self->processed = 0;
 
 	return (DestReceiver *) self;
+}
+
+/*
+ * CopyUpdateBytesProgress --- increment bytes_processed
+ * on CopyState, updates progress and returns amount
+ * of processed bytes back;
+ */
+
+static int
+CopyUpdateBytesProgress(CopyState cstate, int newbytesprocessed)
+{
+	cstate->bytes_processed += newbytesprocessed;
+	pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, cstate->bytes_processed);
+	return newbytesprocessed;
 }

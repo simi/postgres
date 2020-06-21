@@ -1106,7 +1106,7 @@ CREATE VIEW pg_stat_progress_copy AS
         CAST (S.param2::integer AS bool) AS file,
         CAST (S.param3::integer AS bool) AS program,
         S.param4 AS lines_processed,
-        S.param5 AS file_bytes_processed
+        S.param5 AS bytes_processed
     FROM pg_stat_get_progress_info('COPY') AS S
         LEFT JOIN pg_database D ON S.datid = D.oid;
 
