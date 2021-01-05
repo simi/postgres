@@ -6477,7 +6477,7 @@ SELECT pg_stat_get_backend_pid(s.backendid) AS pid,
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>bytes_processed</structfield> <type>bigint</type>
+       <structfield>bytes_total</structfield> <type>bigint</type>
       </para>
       <para>
        Size of source file for <command>COPY FROM</command> command in bytes. It is set to 0 if not available.
@@ -6486,7 +6486,7 @@ SELECT pg_stat_get_backend_pid(s.backendid) AS pid,
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>line_processed</structfield> <type>bigint</type>
+       <structfield>lines_processed</structfield> <type>bigint</type>
       </para>
       <para>
        Number of lines already processed by <command>COPY</command> command.
